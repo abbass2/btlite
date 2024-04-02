@@ -2,22 +2,17 @@
 # $$_code
 # $$_ %%checkall
 from dataclasses import dataclass, field
-from sortedcontainers import SortedDict
 import pyqstrat as pq
 import pandas as pd
 import pandas_market_calendars as mcal
 import numpy as np
-from typing import Callable
+from typing import Callable, Any, cast
 from enum import Enum
 import math
 from types import SimpleNamespace
 from collections import defaultdict
 
-
-# will define Order in a types module
-RuleType = Callable[[Strategy, [np.datetime64]], list[Order]]  # type: ignore # noqa
-MarketSimType = Callable[[Strategy, np.datetime64, list[Order]], list[pq.Trade]]  # type: ignore # noqa
-TradeCBType = Callable[[Strategy, np.datetime64, pq.Trade], None]  # type: ignore # noqa
+_logger = pq.get_child_logger(__name__)
 
 
 class OrderStatus(Enum):
@@ -46,6 +41,9 @@ class ModificationType(Enum):
 class ModRequest:
     modification_type: ModificationType
     request_time: np.datetime64
+    qty: int = 0
+    limit_price: float = np.nan
+    properties: SimpleNamespace = field(default_factory=SimpleNamespace)
 
 
 @dataclass(kw_only=True)
@@ -55,6 +53,7 @@ class Order:
         contract: The contract this order is for
         timestamp: Time the order was placed
         qty:  Number of contracts or shares.  Use a negative quantity for sell orders
+        limit_price: Limit price for the order
         reason_code: The reason this order was created. Default ''
         properties: Any order specific data we want to store.  Default None
         status: Status of the order, "open", "filled", etc. Default "open"
@@ -62,6 +61,7 @@ class Order:
     contract: pq.Contract
     timestamp: np.datetime64 = np.datetime64()
     qty: float = math.nan
+    limit_price: float = math.nan
     reason_code: str = ''
     time_in_force: TimeInForce = TimeInForce.FOK
     properties: SimpleNamespace = field(default_factory=SimpleNamespace)
@@ -95,12 +95,18 @@ def get_new_order_status(mod_type: ModificationType) -> OrderStatus:
     return OrderStatus.CANCELLED  # keep mypy happy
 
 
+# will define Order in a types module
+RuleType = Callable[[Any, [np.datetime64], list[Order]], list[Order]]  # type: ignore # noqa
+MarketSimType = Callable[[Any, np.datetime64, list[Order]], list[pq.Trade]]  # type: ignore # noqa
+TradeCBType = Callable[[Any, np.datetime64, pq.Trade], None]  # type: ignore # noqa
+
+
 @dataclass
 class Strategy:
 
     timestamps: np.ndarray
     rules: dict[str, RuleType]
-    enabled_rules: SortedDict[np.datetime64, set[str]]
+    enabled_rules: defaultdict[np.datetime64, set[str]]
     globally_enabled_rules: set[str]
     market_sims: list[MarketSimType]
     trade_callbacks: list[TradeCBType]
@@ -108,11 +114,13 @@ class Strategy:
     cancelled_orders: list[Order]
     filled_orders: list[Order]
     trade_lag: np.timedelta64
+    log_orders: bool
+    log_trades: bool
 
     def __init__(self, initial_cash: float = 1.e6, trade_lag: np.timedelta64 = np.timedelta64(1, 'm')) -> None:
         self.timestamps = np.ndarray(0)
         self.rules = {}
-        self.enabled_rules = SortedDict()
+        self.enabled_rules = defaultdict(set)
         self.globally_enabled_rules = set()
         self.market_sims = []
         self.trade_callbacks = []
@@ -120,7 +128,9 @@ class Strategy:
         self.cancelled_orders = []
         self.filled_orders = []
         self.trade_lag = np.timedelta64(1, 'm')
-        self.account = Account(cash=initial_cash, positions=defaultdict())
+        self.log_orders = True
+        self.log_trades = True
+        self.account = Account(cash=initial_cash, positions=defaultdict(int))
 
     def set_market_timestamps(self, timestamps: np.ndarray) -> None:
         '''
@@ -153,7 +163,7 @@ class Strategy:
         '''Rules are guaranteed to be run in the order in which they are added here'''
         self.rules[name] = rule
 
-    def enable_rule(self, name: str, timestamps: np.ndarray | None) -> None:
+    def enable_rule(self, name: str, timestamps: np.ndarray | None = None) -> None:
 
         if timestamps is None:
             self.globally_enabled_rules.add(name)
@@ -170,10 +180,13 @@ class Strategy:
 
     def disable_rule(self, name: str) -> None:
         '''Call enable_rule if you want to disable for a few timestamps.'''
-        self.globally_enabled_rules.remove(name)
+        self.globally_enabled_rules.discard(name)
 
     def add_market_sim(self, market_sim: MarketSimType) -> None:
         self.market_sims.append(market_sim)
+
+    def add_trade_callback(self, trade_cb: TradeCBType) -> None:
+        self.trade_callbacks.append(trade_cb)
 
     def get_current_equity(self, timestamp: np.datetime64, prices: dict[np.datetime64, float]) -> float:
         equity: float = self.account.cash
@@ -192,6 +205,8 @@ class Strategy:
             pending_mod = order.pending_mod
             if (timestamp - pending_mod.request_time) < self.trade_lag: continue
             order.status = get_new_order_status(pending_mod.modification_type)
+            if np.isfinite(pending_mod.limit_price): order.limit_price = pending_mod.limit_price
+            if pending_mod.qty != 0: order.qty = pending_mod.qty
             order.pending_mod = None
             
     def _expire_orders(self, timestamp: np.datetime64) -> None:
@@ -209,12 +224,34 @@ class Strategy:
         rule_names = self.enabled_rules[timestamp]
         for rule_name, rule in self.rules.items():
             if rule_name in rule_names or rule_name in self.globally_enabled_rules:
-                new_orders += rule(self, timestamp)
+                new_orders += rule(self, timestamp, self.live_orders + new_orders)
+
+        if self.log_orders:
+            for order in new_orders: 
+                _logger.info(f'ORDER: {order}')
+
         return new_orders
 
-    def _update_order_lists(self) -> list[Order]:
+    # def _update_order_lists(self) -> list[Order]:
+    #     tmp: list[Order] = []
+    #     ready_orders: list[Order] = []
+    #     for order in self.live_orders:
+    #         if order.status == OrderStatus.FILLED:
+    #             self.filled_orders.append(order)
+    #             continue
+    #         if order.status == OrderStatus.CANCELLED:
+    #             self.cancelled_orders.append(order)
+    #             continue
+    #         if order.status in [OrderStatus.OPEN, OrderStatus.PARTIALLY_FILLED]:
+    #             ready_orders.append(order)
+    #         tmp.append(order)
+
+    #     self.live_orders = tmp
+    #     return ready_orders
+    
+
+    def _update_order_lists(self) -> None:
         tmp: list[Order] = []
-        ready_orders: list[Order] = []
         for order in self.live_orders:
             if order.status == OrderStatus.FILLED:
                 self.filled_orders.append(order)
@@ -222,12 +259,9 @@ class Strategy:
             if order.status == OrderStatus.CANCELLED:
                 self.cancelled_orders.append(order)
                 continue
-            if order.status in [OrderStatus.OPEN, OrderStatus.PARTIALLY_FILLED]:
-                ready_orders.append(order)
             tmp.append(order)
-
         self.live_orders = tmp
-        return ready_orders
+
 
     def get_position(self, name: str) -> float:
         val = self.account.positions.get(name)
@@ -236,15 +270,21 @@ class Strategy:
 
     def run(self) -> None:
         for timestamp in self.timestamps:
-            self.live_orders += self._get_new_orders(timestamp)
             self._apply_mod_requests(timestamp)
             self._expire_orders(timestamp)
-            ready_orders = self._update_order_lists()
+            self._update_order_lists()
+            new_orders = self._get_new_orders(timestamp)
+            self.live_orders += new_orders
 
+            ready_orders = [order for order in self.live_orders if order.status in [OrderStatus.OPEN, OrderStatus.PARTIALLY_FILLED]]
             trades: list[pq.Trade] = []
 
             for market_sim in self.market_sims:
                 trades += market_sim(self, timestamp, ready_orders)
+
+            if self.log_trades:
+                for trade in trades:
+                    _logger.info(f'TRADE: {trade}')
 
             for trade in trades:
                 self.account.update_cash(-trade.qty * trade.contract.multiplier * trade.price)
@@ -274,60 +314,117 @@ class EntryRule:
     def __init__(self, prices: dict[np.datetime64, float]) -> None:
         self.prices = prices
 
-    def __call__(self, strategy: Strategy, timestamp: np.datetime64) -> list[Order]:
+    def __call__(self, strategy: Strategy, timestamp: np.datetime64, live_orders: list[Order]) -> list[Order]:
+        if any([order.contract.symbol == 'AAPL' for order in live_orders]): return []
         curr_position = strategy.get_position('AAPL')
         if curr_position != 0: return []
         curr_equity = strategy.get_current_equity(timestamp, self.prices)
         est_price = self.prices[timestamp]
         qty = np.floor((0.1 * curr_equity) / est_price)
-        contract = pq.Contract.get('AAPL')
-        return [Order(contract=contract, timestamp=timestamp, qty=qty, reason_code='ENTER', time_in_force=TimeInForce.FOK)]
+        return [Order(contract=pq.Contract.get('AAPL'), timestamp=timestamp, qty=qty, reason_code='ENTER', time_in_force=TimeInForce.FOK)]
     
     
 class ExitRule:
-    def __call__(self, strategy: Strategy, timestamp: np.datetime64) -> list[Order]:
+    def __call__(self, strategy: Strategy, timestamp: np.datetime64, live_orders: list[Order]) -> list[Order]:
+        if any([order.contract.symbol == 'AAPL' for order in live_orders]): return []
         curr_position = strategy.get_position('AAPL')
         if curr_position == 0: return []
-        contract = pq.Contract.get('AAPL')
-        return [Order(contract=contract, timestamp=timestamp, qty=-curr_position, reason_code='EOD', time_in_force=TimeInForce.GTC)]
+        live_orders = strategy.live_orders
+        if any([order.qty < 0 for order in live_orders]): return []  # some other order is trying to exit
+        return [Order(contract=pq.Contract.get('AAPL'), timestamp=timestamp, qty=-curr_position, reason_code='EOD', time_in_force=TimeInForce.GTC)]
+    
+
+@dataclass
+class StopRule:
+    stop_price: float = math.nan
+    prices: dict[np.datetime64, float] = field(default_factory=dict)
+    
+    def __call__(self, strategy: Strategy, timestamp: np.datetime64, live_orders: list[Order]) -> list[Order]:
+        if any([order.contract.symbol == 'AAPL' for order in live_orders]): return []
+        curr_position = strategy.get_position('AAPL')
+        if curr_position == 0: return []
+        live_orders = strategy.live_orders
+        if any([order.qty < 0 for order in live_orders]): return []  # some other order is trying to exit
+        price = prices[timestamp]
+        if price >= self.stop_price:
+            return [Order(contract=pq.Contract.get('AAPL'), timestamp=timestamp, qty=-curr_position, reason_code='STOP', time_in_force=TimeInForce.GTC)]
+        return []
     
     
+class TradeCallback:
+    def __init__(self, prices: dict[np.datetime64, float]) -> None:
+        self.prices = prices
+
+    def __call__(self, strategy: Strategy, timestamp: np.datetime64, trade: pq.Trade) -> None:
+        if trade.qty < 0:  
+            strategy.disable_rule('stop')
+        else:
+            stop_rule = cast(StopRule, strategy.rules['stop'])
+            stop_rule.prices = self.prices
+            stop_rule.stop_price = 12.
+            strategy.enable_rule('stop')
+
+
 class MarketSim:
     def __init__(self, prices: dict[np.datetime64, float]) -> None:
         self.prices = prices    
 
-    def __call__(self, timestamp: np.datetime64, orders: list[Order]) -> list[pq.Trade]:
+    def __call__(self, strategy: Strategy, timestamp: np.datetime64, orders: list[Order]) -> list[pq.Trade]:
         trade_price = self.prices[timestamp]
         trades: list[pq.Trade] = []
         for order in orders:
             trade = pq.Trade(order.contract, order, timestamp, order.qty, trade_price)
             trades.append(trade)
+            order.fill()
         return trades
 
 
 def get_prices(df: pd.DataFrame) -> dict[np.datetime64, float]:
     timestamps = df.timestamp.values.astype('M8[m]')
-    c = df.c.values.astype('M8[m]')
+    c = df.c.values
     prices = {timestamps[i]: c[i] for i in range(len(timestamps))}
     return prices
 
 
 if __name__ == '__mainx__':
-    np.random.seed(0)
-    cal = mcal.get_calendar('NYSE')
-    schedule = cal.schedule('2024-01-02')
-    timestamps = mcal.date_range(schedule, frequency='1m', closed='left', force_close=False).tz_localize(None).values
+    timestamps = np.arange(np.datetime64('2024-01-02 09:00'), np.datetime64('2024-01-02 09:06'))
+    contract = pq.Contract.get_or_create('AAPL')
     df = pd.DataFrame({'timestamp': timestamps})
-    df['ret'] = np.random.normal(0, 0.001, len(timestamps))
+    df['ret'] = [0.01, -0.01, 0.02, -0.005, 0.01, 0.03]
     df['c'] = (1 + df.ret).cumprod() * 10.
     df['date'] = df.timestamp.values.astype('M8[D]')
-    df['eod'] = (df.date != df.date.shift(-1))
+    df['eod'] = [False, False, False, True, True, True]
     strategy = Strategy()
     strategy.set_market_timestamps(timestamps)
     prices = get_prices(df)
     strategy.add_rule('entry', EntryRule(prices))
     strategy.add_rule('exit', ExitRule())
-    strategy.enable_rule('entry', df[df.c > 10.5].timestamp.values.astype('M8[m]'))
+    strategy.enable_rule('entry', df[df.c > 10.15].timestamp.values.astype('M8[m]'))
     strategy.enable_rule('exit', df[df.eod].timestamp.values.astype('M8[m]'))
+    strategy.add_market_sim(MarketSim(prices))
+    strategy.run()
+
+
+if __name__ == '__main__':
+    timestamps = np.arange(np.datetime64('2024-01-02 09:00'), np.datetime64('2024-01-02 09:06'))
+    contract = pq.Contract.get_or_create('AAPL')
+    df = pd.DataFrame({'timestamp': timestamps})
+    df['ret'] = [0.01, 0.02, 0, 0.2, -0.01, 0.03]
+    df['c'] = (1 + df.ret).cumprod() * 10.
+    df['date'] = df.timestamp.values.astype('M8[D]')
+    df['eod'] = [False, False, False, False, True, True]
+    strategy = Strategy()
+    strategy.set_market_timestamps(timestamps)
+    prices = get_prices(df)
+    strategy.add_rule('exit', ExitRule())
+    strategy.add_rule('stop', StopRule())
+    strategy.add_rule('entry', EntryRule(prices))
+    strategy.add_trade_callback(TradeCallback(prices))
+    strategy.enable_rule('entry', df[df.c > 10.15].timestamp.values.astype('M8[m]'))
+    strategy.enable_rule('exit', df[df.eod].timestamp.values.astype('M8[m]'))
+
+    strategy.add_market_sim(MarketSim(prices))
     strategy.run()
 # $$_end_code
+    
+
