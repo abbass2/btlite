@@ -117,7 +117,7 @@ class Strategy:
     log_orders: bool
     log_trades: bool
 
-    def __init__(self, initial_cash: float = 1.e6, trade_lag: np.timedelta64 = np.timedelta64(1, 'm')) -> None:
+    def __init__(self, initial_cash: float = 1e6, trade_lag: np.timedelta64 = np.timedelta64(1, 'm')) -> None:
         self.timestamps = np.ndarray(0)
         self.rules = {}
         self.enabled_rules = defaultdict(set)
@@ -150,7 +150,8 @@ class Strategy:
         cal = mcal.get_calendar(calendar)
         pq.assert_(cal is not None)
         schedule = cal.schedule(start_date, end_date)
-        timestamps = mcal.date_range(schedule, frequency=freq, closed='left', force_close=False).tz_localize(None).values
+        timestamps = mcal.date_range(schedule, frequency=freq, closed='left', force_close=False)
+        timestamps = timestamps.tz_convert(tz).tz_localize(None).values
         if freq.endswith('m'):
             timestamps = timestamps.astype('M8[m]')
         elif freq.endswith('D'):
@@ -188,10 +189,10 @@ class Strategy:
     def add_trade_callback(self, trade_cb: TradeCBType) -> None:
         self.trade_callbacks.append(trade_cb)
 
-    def get_current_equity(self, timestamp: np.datetime64, prices: dict[np.datetime64, float]) -> float:
+    def get_current_equity(self, timestamp: np.datetime64, prices: dict[tuple[str, np.datetime64], float]) -> float:
         equity: float = self.account.cash
         for (name, qty) in self.account.positions.items():
-            price = prices.get(timestamp)
+            price = prices.get((name, timestamp))
             pq.assert_(price is not None, f'price missing for: {name} {timestamp}')
             assert price is not None  # keep mypy happy
             multiplier = pq.Contract.get(name).multiplier
@@ -232,24 +233,6 @@ class Strategy:
 
         return new_orders
 
-    # def _update_order_lists(self) -> list[Order]:
-    #     tmp: list[Order] = []
-    #     ready_orders: list[Order] = []
-    #     for order in self.live_orders:
-    #         if order.status == OrderStatus.FILLED:
-    #             self.filled_orders.append(order)
-    #             continue
-    #         if order.status == OrderStatus.CANCELLED:
-    #             self.cancelled_orders.append(order)
-    #             continue
-    #         if order.status in [OrderStatus.OPEN, OrderStatus.PARTIALLY_FILLED]:
-    #             ready_orders.append(order)
-    #         tmp.append(order)
-
-    #     self.live_orders = tmp
-    #     return ready_orders
-    
-
     def _update_order_lists(self) -> None:
         tmp: list[Order] = []
         for order in self.live_orders:
@@ -262,11 +245,13 @@ class Strategy:
             tmp.append(order)
         self.live_orders = tmp
 
-
     def get_position(self, name: str) -> float:
         val = self.account.positions.get(name)
         if val is None: return 0.
         return val
+
+    def get_positions(self) -> dict[str, int]:
+        return self.account.positions
 
     def run(self) -> None:
         for timestamp in self.timestamps:
@@ -305,6 +290,7 @@ class Account:
         cash += add_amount
         pq.assert_(cash >= 0., f'cash cannot go below 0: {cash}')
         self.cash += add_amount
+        _logger.info(f'removed cash: {add_amount} new cash: {self.cash}')
 
     def update_position(self, name: str, add_amount: int) -> None:
         self.positions[name] += add_amount
@@ -312,14 +298,14 @@ class Account:
 
 class EntryRule:
     def __init__(self, prices: dict[np.datetime64, float]) -> None:
-        self.prices = prices
+        self.prices = {('AAPL', timestamp): price for timestamp, price in prices.items()}
 
     def __call__(self, strategy: Strategy, timestamp: np.datetime64, live_orders: list[Order]) -> list[Order]:
         if any([order.contract.symbol == 'AAPL' for order in live_orders]): return []
         curr_position = strategy.get_position('AAPL')
         if curr_position != 0: return []
         curr_equity = strategy.get_current_equity(timestamp, self.prices)
-        est_price = self.prices[timestamp]
+        est_price = self.prices[('AAPL', timestamp)]
         qty = np.floor((0.1 * curr_equity) / est_price)
         return [Order(contract=pq.Contract.get('AAPL'), timestamp=timestamp, qty=qty, reason_code='ENTER', time_in_force=TimeInForce.FOK)]
     
@@ -426,5 +412,6 @@ if __name__ == '__main__':
     strategy.add_market_sim(MarketSim(prices))
     strategy.run()
 # $$_end_code
-    
-
+# $$_code
+[3, 4, 5] + [6, 7, 8]
+# $$_end_code
