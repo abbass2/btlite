@@ -43,7 +43,6 @@ class ModRequest:
     request_time: np.datetime64
     qty: int = 0
     limit_price: float = np.nan
-    properties: SimpleNamespace = field(default_factory=SimpleNamespace)
 
 
 @dataclass(kw_only=True)
@@ -60,7 +59,8 @@ class Order:
     '''
     contract: pq.Contract
     timestamp: np.datetime64 = np.datetime64()
-    qty: float = math.nan
+    qty: int = 0
+    remaining_qty: int = 0
     limit_price: float = math.nan
     reason_code: str = ''
     time_in_force: TimeInForce = TimeInForce.FOK
@@ -70,22 +70,32 @@ class Order:
 
     def __post_init__(self) -> None:
         self.pending_mod = ModRequest(ModificationType.OPEN, self.timestamp)
+        self.remaining_qty = self.qty
         
     def request_modification(self, mod_request: ModRequest) -> None:
         self.pending_mod = mod_request
         
-    def fill(self, fill_qty: float = math.nan) -> None:
+    def fill(self, fill_qty: int = 0) -> None:
         pq.assert_(self.status in [OrderStatus.OPEN, OrderStatus.PARTIALLY_FILLED], 
                    f'cannot fill an order in status: {self.status}')
-        if math.isnan(fill_qty): fill_qty = self.qty
-        pq.assert_(self.qty * fill_qty >= 0, f'order qty: {self.qty} cannot be opposite sign of {fill_qty}')
-        pq.assert_(abs(fill_qty) <= abs(self.qty), f'cannot fill qty: {fill_qty} larger than order qty: {self.qty}')
-        self.qty -= fill_qty
-        if math.isclose(self.qty, 0):
+        if fill_qty == 0: fill_qty = self.remaining_qty
+        pq.assert_(self.remaining_qty * fill_qty >= 0, f'order qty: {self.qty} cannot be opposite sign of {fill_qty}')
+        pq.assert_(abs(fill_qty) <= abs(self.remaining_qty), f'cannot fill qty: {fill_qty} larger than remaining qty: {self.remaining_qty}')
+        self.remaining_qty -= fill_qty
+        if self.remaining_qty == 0:
             self.status = OrderStatus.FILLED
         else:
             self.status = OrderStatus.PARTIALLY_FILLED
         self.pending_mod = None
+
+    def __repr__(self) -> str:
+        msg = (f'{self.reason_code} {self.contract.symbol} {self.timestamp} qty: {self.qty} limit: {self.limit_price}'
+               f' status: {self.status.name} tif: {self.time_in_force.name}')
+        if self.pending_mod is not None:
+            msg += f' pending_mod: {self.pending_mod.modification_type.name}'
+        if len(self.properties.__dict__):
+            msg += f' props: {self.properties}'
+        return msg
         
 
 def get_new_order_status(mod_type: ModificationType) -> OrderStatus:
@@ -113,6 +123,7 @@ class Strategy:
     live_orders: list[Order]
     cancelled_orders: list[Order]
     filled_orders: list[Order]
+    trade_history: list[pq.Trade]
     trade_lag: np.timedelta64
     log_orders: bool
     log_trades: bool
@@ -127,6 +138,7 @@ class Strategy:
         self.live_orders = []
         self.cancelled_orders = []
         self.filled_orders = []
+        self.trade_history = []
         self.trade_lag = np.timedelta64(1, 'm')
         self.log_orders = True
         self.log_trades = True
@@ -193,8 +205,9 @@ class Strategy:
         equity: float = self.account.cash
         for (name, qty) in self.account.positions.items():
             price = prices.get((name, timestamp))
-            pq.assert_(price is not None, f'price missing for: {name} {timestamp}')
-            assert price is not None  # keep mypy happy
+            if price is None: return math.nan
+            # pq.assert_(price is not None, f'price missing for: {name} {timestamp}')
+            # assert price is not None  # keep mypy happy
             multiplier = pq.Contract.get(name).multiplier
             mv = price * qty * multiplier
             equity += mv
@@ -245,9 +258,9 @@ class Strategy:
             tmp.append(order)
         self.live_orders = tmp
 
-    def get_position(self, name: str) -> float:
+    def get_position(self, name: str) -> int:
         val = self.account.positions.get(name)
-        if val is None: return 0.
+        if val is None: return 0
         return val
 
     def get_positions(self) -> dict[str, int]:
@@ -272,6 +285,9 @@ class Strategy:
                     _logger.info(f'TRADE: {trade}')
 
             for trade in trades:
+                self.trade_history.append(trade)
+
+            for trade in trades:
                 self.account.update_cash(-trade.qty * trade.contract.multiplier * trade.price)
                 self.account.update_position(trade.contract.symbol, trade.qty)
 
@@ -290,7 +306,7 @@ class Account:
         cash += add_amount
         pq.assert_(cash >= 0., f'cash cannot go below 0: {cash}')
         self.cash += add_amount
-        _logger.info(f'removed cash: {add_amount} new cash: {self.cash}')
+        _logger.debug(f'removed cash: {add_amount} new cash: {self.cash}')
 
     def update_position(self, name: str, add_amount: int) -> None:
         self.positions[name] += add_amount
@@ -411,7 +427,4 @@ if __name__ == '__main__':
 
     strategy.add_market_sim(MarketSim(prices))
     strategy.run()
-# $$_end_code
-# $$_code
-[3, 4, 5] + [6, 7, 8]
 # $$_end_code
