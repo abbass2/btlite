@@ -279,6 +279,7 @@ class Strategy:
     def get_current_equity(self, timestamp: np.datetime64, prices: dict[tuple[str, np.datetime64], float]) -> float:
         equity: float = self.account.cash
         for (name, qty) in self.account.positions.items():
+            if qty == 0: continue
             price = prices.get((name, timestamp))
             if price is None:
                 _logger.warning(f'could not find price for: {name} {timestamp}')
@@ -372,11 +373,6 @@ class Strategy:
                 for trade_callback in self.trade_callbacks:
                     trade_callback(self, timestamp, trade)
 
-    # def get_pnl(self, prices: dict[tuple[str, np.datetime64], float]) -> pd.DataFrame:
-    #     timestamps = np.unique([ts for symbol, ts in prices.keys()])
-    #     trades = pq.roundtrip_trades(self.trade_history)
-    #     pnl = get_pnl(trades, timestamps, prices)
-    #     return pd.DataFrame.from_records(pnl, columns=['trade_id', 'date', 'unrealized', 'realized', 'commission'])
     def get_daily_pnl(self, prices: dict[tuple[str, np.datetime64], float], pnl_time: int = 15 * 60 + 59) -> pd.DataFrame:
         timestamps = np.unique(self.timestamps.astype('M8[D]')) + np.timedelta64(pnl_time, 'm')
         trades = pq.roundtrip_trades(self.trade_history)
@@ -384,7 +380,7 @@ class Strategy:
         df = pd.DataFrame.from_records(pnl, columns=['trade_id', 'timestamp', 'unrealized', 'realized', 'commission'])
         df['pnl'] = df.unrealized + df.realized + df.commission
         df = df[['timestamp', 'pnl', 'unrealized', 'realized', 'commission']].groupby('timestamp', as_index=False).sum()
-        df['equity'] = self.initial_cash * df.pnl.cumsum()
+        df['equity'] = self.initial_cash + df.pnl.cumsum()
         df['ret'] = df.equity.pct_change()
         return df
 
