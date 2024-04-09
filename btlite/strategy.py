@@ -15,6 +15,80 @@ from collections import defaultdict
 _logger = pq.get_child_logger(__name__)
 
 
+def get_trade_pnl(trade: pq.RoundTripTrade, 
+                  timestamps: np.ndarray, 
+                  prices: dict[tuple[str, np.datetime64], float]) -> list[tuple[np.datetime64, float, float, float]]:
+    '''
+    >>> from types import SimpleNamespace
+    >>> trade = SimpleNamespace(
+    >>> contract=SimpleNamespace(symbol='AAPL US', multiplier=1), 
+    >>> entry_timestamp=np.datetime64('2023-01-02'), 
+    >>> exit_timestamp=np.datetime64('2023-01-04'), 
+    >>> entry_price=99.,
+    exit_price=105.,
+    qty=10,
+    entry_commission=10.,
+    exit_commission=15.)
+    run_dates = np.array(['2023-01-01', '2023-01-02', '2023-01-03', '2023-01-31'], dtype='M8[D]')
+    prices = {('AAPL US', np.datetime64('2023-01-01')): 100.,
+            ('AAPL US', np.datetime64('2023-01-02')): 101.,
+            ('AAPL US', np.datetime64('2023-01-03')): 102.,
+            ('AAPL US', np.datetime64('2023-01-31')): 103.}
+    trade_pnl = get_trade_pnl(trade, run_dates, prices)
+    assert len(trade_pnl) == 3 
+    assert trade_pnl[-1] == (np.datetime64('2023-01-31'), (-30.0, 60.0, 25.0))
+    '''
+    entry_commission_applied = False
+    symbol = trade.contract.symbol
+ 
+    rows: list = []
+
+    unrealized = 0.
+    realized = 0.
+    commission = 0.
+    unrealized_mv = 0.
+
+    for i, timestamp in enumerate(timestamps):
+        if timestamp < trade.entry_timestamp: continue
+
+        if not entry_commission_applied:
+            commission += trade.entry_commission
+            entry_commission_applied = True
+        
+        if timestamp >= trade.exit_timestamp:
+            commission += trade.exit_commission
+            realized = (trade.exit_price - trade.entry_price) * trade.contract.multiplier * trade.qty
+            unrealized = -unrealized_mv
+            rows.append((timestamp, unrealized, realized, commission))
+            break
+
+        price = prices.get((symbol, timestamp))
+        if price is None:
+            _logger.warning(f'could not find price for: {symbol} {timestamp}')
+            price = np.nan
+
+        _unrealized_mv = (price - trade.entry_price) * trade.contract.multiplier * trade.qty
+        unrealized = _unrealized_mv - unrealized_mv  # current - previous
+        unrealized_mv = _unrealized_mv
+        rows.append((timestamp, unrealized, realized, commission))
+    return rows
+
+
+def get_pnl(trades: list[pq.RoundTripTrade], 
+            timestamps: np.ndarray, 
+            prices: dict[tuple[str, np.datetime64], float]) -> list[tuple[str, np.datetime64, float, float, float]]:
+    rows: list[tuple[str, np.datetime64, float, float, float]] = []
+    for trade in trades:
+        trade_pnl = get_trade_pnl(trade, timestamps, prices)
+        for row in trade_pnl:
+            rows.append((trade.entry_properties.trade_id, row[0], row[1], row[2], row[3]))
+    return rows
+
+
+def get_pnl_df(pnl: list[tuple[str, np.datetime64, float, float, float]]) -> pd.DataFrame:
+    return pd.DataFrame.from_records(pnl, columns=['trade_id', 'timestamp', 'unrealized', 'realized', 'commission'])
+
+
 class OrderStatus(Enum):
     '''
     Enum for order status
@@ -142,6 +216,7 @@ class Strategy:
         self.trade_lag = np.timedelta64(1, 'm')
         self.log_orders = True
         self.log_trades = True
+        self.initial_cash = initial_cash
         self.account = Account(cash=initial_cash, positions=defaultdict(int))
 
     def set_market_timestamps(self, timestamps: np.ndarray) -> None:
@@ -205,7 +280,9 @@ class Strategy:
         equity: float = self.account.cash
         for (name, qty) in self.account.positions.items():
             price = prices.get((name, timestamp))
-            if price is None: return math.nan
+            if price is None:
+                _logger.warning(f'could not find price for: {name} {timestamp}')
+                return math.nan
             # pq.assert_(price is not None, f'price missing for: {name} {timestamp}')
             # assert price is not None  # keep mypy happy
             multiplier = pq.Contract.get(name).multiplier
@@ -295,6 +372,22 @@ class Strategy:
                 for trade_callback in self.trade_callbacks:
                     trade_callback(self, timestamp, trade)
 
+    # def get_pnl(self, prices: dict[tuple[str, np.datetime64], float]) -> pd.DataFrame:
+    #     timestamps = np.unique([ts for symbol, ts in prices.keys()])
+    #     trades = pq.roundtrip_trades(self.trade_history)
+    #     pnl = get_pnl(trades, timestamps, prices)
+    #     return pd.DataFrame.from_records(pnl, columns=['trade_id', 'date', 'unrealized', 'realized', 'commission'])
+    def get_daily_pnl(self, prices: dict[tuple[str, np.datetime64], float], pnl_time: int = 15 * 60 + 59) -> pd.DataFrame:
+        timestamps = np.unique(self.timestamps.astype('M8[D]')) + np.timedelta64(pnl_time, 'm')
+        trades = pq.roundtrip_trades(self.trade_history)
+        pnl = get_pnl(trades, timestamps, prices)
+        df = pd.DataFrame.from_records(pnl, columns=['trade_id', 'timestamp', 'unrealized', 'realized', 'commission'])
+        df['pnl'] = df.unrealized + df.realized + df.commission
+        df = df[['timestamp', 'pnl', 'unrealized', 'realized', 'commission']].groupby('timestamp', as_index=False).sum()
+        df['equity'] = self.initial_cash * df.pnl.cumsum()
+        df['ret'] = df.equity.pct_change()
+        return df
+
 
 @dataclass
 class Account:
@@ -374,8 +467,8 @@ class MarketSim:
     def __call__(self, strategy: Strategy, timestamp: np.datetime64, orders: list[Order]) -> list[pq.Trade]:
         trade_price = self.prices[timestamp]
         trades: list[pq.Trade] = []
-        for order in orders:
-            trade = pq.Trade(order.contract, order, timestamp, order.qty, trade_price)
+        for i, order in enumerate(orders):
+            trade = pq.Trade(order.contract, order, timestamp, order.qty, trade_price, properties=SimpleNamespace(trade_id=str(i)))
             trades.append(trade)
             order.fill()
         return trades
@@ -427,4 +520,17 @@ if __name__ == '__main__':
 
     strategy.add_market_sim(MarketSim(prices))
     strategy.run()
+
+    _trades = pq.roundtrip_trades(strategy.trade_history)
+    pnl = get_pnl(_trades, np.array([np.datetime64('2024-01-02 15:59')]), {('AAPL', np.datetime64('2024-01-02 15:59')): np.nan})
+
+    pnl_df = get_pnl_df(pnl)
+    assert len(pnl_df) == 1
+    row = pnl_df.iloc[0]
+    assert math.isclose(row.unrealized, 0.)
+    assert math.isclose(row.realized, 18798.347856)
+    assert math.isclose(row.commission, 0.)
+    strat_pnl = strategy.get_daily_pnl({('AAPL', np.datetime64('2024-01-02 15:59')): np.nan})
+    row = strat_pnl.iloc[0]
+    assert math.isclose(row.pnl, 18798.347856)
 # $$_end_code
