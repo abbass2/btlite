@@ -131,6 +131,7 @@ class Order:
         properties: Any order specific data we want to store.  Default None
         status: Status of the order, "open", "filled", etc. Default "open"
     '''
+    order_id: str
     contract: pq.Contract
     timestamp: np.datetime64 = np.datetime64()
     qty: int = 0
@@ -213,7 +214,7 @@ class Strategy:
         self.cancelled_orders = []
         self.filled_orders = []
         self.trade_history = []
-        self.trade_lag = np.timedelta64(1, 'm')
+        self.trade_lag = trade_lag
         self.log_orders = True
         self.log_trades = True
         self.initial_cash = initial_cash
@@ -404,6 +405,7 @@ class Account:
 class EntryRule:
     def __init__(self, prices: dict[np.datetime64, float]) -> None:
         self.prices = {('AAPL', timestamp): price for timestamp, price in prices.items()}
+        self.order_id = 0
 
     def __call__(self, strategy: Strategy, timestamp: np.datetime64, live_orders: list[Order]) -> list[Order]:
         if any([order.contract.symbol == 'AAPL' for order in live_orders]): return []
@@ -412,33 +414,57 @@ class EntryRule:
         curr_equity = strategy.get_current_equity(timestamp, self.prices)
         est_price = self.prices[('AAPL', timestamp)]
         qty = np.floor((0.1 * curr_equity) / est_price)
-        return [Order(contract=pq.Contract.get('AAPL'), timestamp=timestamp, qty=qty, reason_code='ENTER', time_in_force=TimeInForce.FOK)]
+        self.order_id += 1
+        return [Order(
+                order_id=f'enter_{self.order_id}', 
+                contract=pq.Contract.get_or_create('AAPL'), 
+                timestamp=timestamp, 
+                qty=qty, 
+                reason_code='ENTER', 
+                time_in_force=TimeInForce.FOK)]
     
     
+@dataclass
 class ExitRule:
+    order_id: int = 0
+
     def __call__(self, strategy: Strategy, timestamp: np.datetime64, live_orders: list[Order]) -> list[Order]:
         if any([order.contract.symbol == 'AAPL' for order in live_orders]): return []
         curr_position = strategy.get_position('AAPL')
         if curr_position == 0: return []
         live_orders = strategy.live_orders
         if any([order.qty < 0 for order in live_orders]): return []  # some other order is trying to exit
-        return [Order(contract=pq.Contract.get('AAPL'), timestamp=timestamp, qty=-curr_position, reason_code='EOD', time_in_force=TimeInForce.GTC)]
+        self.order_id += 1
+        return [Order(order_id=f'exit_{self.order_id}',
+                      contract=pq.Contract.get_or_create('AAPL'), 
+                      timestamp=timestamp, 
+                      qty=-curr_position, 
+                      reason_code='EOD', 
+                      time_in_force=TimeInForce.GTC)]
     
 
 @dataclass
 class StopRule:
+    order_id: int = 0
     stop_price: float = math.nan
     prices: dict[np.datetime64, float] = field(default_factory=dict)
-    
+
     def __call__(self, strategy: Strategy, timestamp: np.datetime64, live_orders: list[Order]) -> list[Order]:
         if any([order.contract.symbol == 'AAPL' for order in live_orders]): return []
         curr_position = strategy.get_position('AAPL')
         if curr_position == 0: return []
         live_orders = strategy.live_orders
         if any([order.qty < 0 for order in live_orders]): return []  # some other order is trying to exit
-        price = prices[timestamp]
+        price = self.prices[timestamp]
         if price >= self.stop_price:
-            return [Order(contract=pq.Contract.get('AAPL'), timestamp=timestamp, qty=-curr_position, reason_code='STOP', time_in_force=TimeInForce.GTC)]
+            self.order_id += 1
+            return [Order(
+                    order_id=f'stop_{self.order_id}',
+                    contract=pq.Contract.get_or_create('AAPL'), 
+                    timestamp=timestamp, 
+                    qty=-curr_position, 
+                    reason_code='STOP', 
+                    time_in_force=TimeInForce.GTC)]
         return []
     
     
@@ -477,9 +503,8 @@ def get_prices(df: pd.DataFrame) -> dict[np.datetime64, float]:
     return prices
 
 
-if __name__ == '__mainx__':
+def test_simple_strat() -> None:
     timestamps = np.arange(np.datetime64('2024-01-02 09:00'), np.datetime64('2024-01-02 09:06'))
-    contract = pq.Contract.get_or_create('AAPL')
     df = pd.DataFrame({'timestamp': timestamps})
     df['ret'] = [0.01, -0.01, 0.02, -0.005, 0.01, 0.03]
     df['c'] = (1 + df.ret).cumprod() * 10.
@@ -496,9 +521,9 @@ if __name__ == '__mainx__':
     strategy.run()
 
 
-if __name__ == '__main__':
+def test_stop_strat() -> None:
     timestamps = np.arange(np.datetime64('2024-01-02 09:00'), np.datetime64('2024-01-02 09:06'))
-    contract = pq.Contract.get_or_create('AAPL')
+    # contract = pq.Contract.get_or_create('AAPL')
     df = pd.DataFrame({'timestamp': timestamps})
     df['ret'] = [0.01, 0.02, 0, 0.2, -0.01, 0.03]
     df['c'] = (1 + df.ret).cumprod() * 10.
@@ -529,4 +554,9 @@ if __name__ == '__main__':
     strat_pnl = strategy.get_daily_pnl({('AAPL', np.datetime64('2024-01-02 15:59')): np.nan})
     row = strat_pnl.iloc[0]
     assert math.isclose(row.pnl, 18798.347856)
+
+
+if __name__ == '__main__':
+    test_simple_strat()
+    test_stop_strat()
 # $$_end_code
