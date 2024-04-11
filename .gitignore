@@ -160,3 +160,4 @@ cython_debug/
 #.idea/
 tmp_mypy.py
 .DS_Store
+*.ipynb
