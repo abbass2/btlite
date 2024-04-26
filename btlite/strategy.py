@@ -317,7 +317,9 @@ class Strategy:
         rule_names = self.enabled_rules[timestamp]
         for rule_name, rule in self.rules.items():
             if rule_name in rule_names or rule_name in self.globally_enabled_rules:
-                new_orders += rule(self, timestamp, self.live_orders + new_orders)
+                _new_orders = rule(self, timestamp, self.live_orders + new_orders)
+                new_orders += _new_orders
+                self.live_orders += _new_orders
 
         if self.log_orders:
             for order in new_orders: 
@@ -351,7 +353,7 @@ class Strategy:
             self._expire_orders(timestamp)
             self._update_order_lists()
             new_orders = self._get_new_orders(timestamp)
-            self.live_orders += new_orders
+            # self.live_orders += new_orders
 
             ready_orders = [order for order in self.live_orders if order.status in [OrderStatus.OPEN, OrderStatus.PARTIALLY_FILLED]]
             trades: list[pq.Trade] = []
