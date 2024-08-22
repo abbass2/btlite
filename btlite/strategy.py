@@ -130,22 +130,22 @@ def get_trade_pnl(trade: RoundTripTrade,
     '''
     >>> from types import SimpleNamespace
     >>> trade = SimpleNamespace(
-    >>> contract=SimpleNamespace(symbol='AAPL US', multiplier=1), 
-    >>> entry_timestamp=np.datetime64('2023-01-02'), 
-    >>> exit_timestamp=np.datetime64('2023-01-04'), 
-    >>> entry_price=99.,
-    exit_price=105.,
-    qty=10,
-    entry_commission=10.,
-    exit_commission=15.)
-    run_dates = np.array(['2023-01-01', '2023-01-02', '2023-01-03', '2023-01-31'], dtype='M8[D]')
-    prices = {('AAPL US', np.datetime64('2023-01-01')): 100.,
-            ('AAPL US', np.datetime64('2023-01-02')): 101.,
-            ('AAPL US', np.datetime64('2023-01-03')): 102.,
-            ('AAPL US', np.datetime64('2023-01-31')): 103.}
-    trade_pnl = get_trade_pnl(trade, run_dates, prices)
-    assert len(trade_pnl) == 3 
-    assert trade_pnl[-1] == (np.datetime64('2023-01-31'), (-30.0, 60.0, 25.0))
+    ... contract=SimpleNamespace(symbol='AAPL US', multiplier=1), 
+    ... entry_timestamp=np.datetime64('2023-01-02'), 
+    ... exit_timestamp=np.datetime64('2023-01-04'), 
+    ... entry_price=99.,
+    ... exit_price=105.,
+    ... qty=10,
+    ... entry_commission=10.,
+    ... exit_commission=15.)
+    >>> run_dates = np.array(['2023-01-01', '2023-01-02', '2023-01-03', '2023-01-31'], dtype='M8[D]')
+    >>> prices = {('AAPL US', np.datetime64('2023-01-01')): 100.,
+    ...        ('AAPL US', np.datetime64('2023-01-02')): 101.,
+    ...        ('AAPL US', np.datetime64('2023-01-03')): 102.,
+    ...        ('AAPL US', np.datetime64('2023-01-31')): 103.}
+    >>> trade_pnl = get_trade_pnl(trade, run_dates, prices)
+    >>> assert len(trade_pnl) == 3 
+    >>> assert trade_pnl[-1] == (np.datetime64('2023-01-31'), -30.0, 60.0, 25.0)
     '''
     entry_commission_applied = False
     symbol = trade.contract.symbol
@@ -427,4 +427,8 @@ class Account:
     def update_position(self, name: str, add_amount: int) -> None:
         self.positions[name] += add_amount
 
+
+if __name__ == "__main__":
+    import doctest
+    doctest.testmod(optionflags=doctest.NORMALIZE_WHITESPACE)
 # $$_end_code

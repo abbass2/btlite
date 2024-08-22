@@ -5,7 +5,7 @@
 import logging
 import sys
 import os
-
+import tempfile
 
 
 def _add_stream_handler(logger: logging.Logger, 
@@ -56,6 +56,13 @@ def assert_(condition: bool, msg: str | None = None) -> None:
             import pdb
             pdb.set_trace()
         raise PQException(msg)
+
+
+def get_temp_dir() -> str:
+    if os.access('/tmp', os.W_OK):
+        return '/tmp'
+    else:
+        return tempfile.gettempdir()
 
 
 if __name__ == '__main__':
