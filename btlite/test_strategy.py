@@ -16,8 +16,8 @@ class EntryRule:
         self.prices = {('AAPL', timestamp): price for timestamp, price in prices.items()}
         self.order_id = 0
 
-    def __call__(self, strategy: Strategy, timestamp: np.datetime64, live_orders: list[Order]) -> list[Order]:
-        if any([order.contract.symbol == 'AAPL' for order in live_orders]): return []
+    def __call__(self, strategy: Strategy, timestamp: np.datetime64) -> list[Order]:
+        if any([order.contract.symbol == 'AAPL' for order in strategy.live_orders]): return []
         curr_position = strategy.get_position('AAPL')
         if curr_position != 0: return []
         curr_equity = strategy.get_current_equity(timestamp, self.prices)
@@ -37,8 +37,8 @@ class EntryRule:
 class ExitRule:
     order_id: int = 0
 
-    def __call__(self, strategy: Strategy, timestamp: np.datetime64, live_orders: list[Order]) -> list[Order]:
-        if any([order.contract.symbol == 'AAPL' for order in live_orders]): return []
+    def __call__(self, strategy: Strategy, timestamp: np.datetime64) -> list[Order]:
+        if any([order.contract.symbol == 'AAPL' for order in strategy.live_orders]): return []
         curr_position = strategy.get_position('AAPL')
         if curr_position == 0: return []
         live_orders = strategy.live_orders
@@ -58,12 +58,11 @@ class StopRule:
     stop_price: float = math.nan
     prices: dict[np.datetime64, float] = field(default_factory=dict)
 
-    def __call__(self, strategy: Strategy, timestamp: np.datetime64, live_orders: list[Order]) -> list[Order]:
-        if any([order.contract.symbol == 'AAPL' for order in live_orders]): return []
+    def __call__(self, strategy: Strategy, timestamp: np.datetime64) -> list[Order]:
+        if any([order.contract.symbol == 'AAPL' for order in strategy.live_orders]): return []
         curr_position = strategy.get_position('AAPL')
         if curr_position == 0: return []
-        live_orders = strategy.live_orders
-        if any([order.qty < 0 for order in live_orders]): return []  # some other order is trying to exit
+        if any([order.qty < 0 for order in strategy.live_orders]): return []  # some other order is trying to exit
         price = self.prices[timestamp]
         if price >= self.stop_price:
             self.order_id += 1

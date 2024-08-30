@@ -206,7 +206,7 @@ def get_new_order_status(mod_type: ModificationType) -> OrderStatus:
 
 
 # will define Order in a types module
-RuleType = Callable[[Any, [np.datetime64], list[Order]], list[Order]]  # type: ignore # noqa
+RuleType = Callable[[Any, [np.datetime64]], list[Order]]  # type: ignore # noqa
 MarketSimType = Callable[[Any, np.datetime64, list[Order]], list[Trade]]  # type: ignore # noqa
 TradeCBType = Callable[[Any, np.datetime64, Trade], None]  # type: ignore # noqa
 
@@ -342,7 +342,7 @@ class Strategy:
         rule_names = self.enabled_rules[timestamp]
         for rule_name, rule in self.rules.items():
             if rule_name in rule_names or rule_name in self.globally_enabled_rules:
-                _new_orders = rule(self, timestamp, self.live_orders + new_orders)
+                _new_orders = rule(self, timestamp)
                 new_orders += _new_orders
                 self.live_orders += _new_orders
 
