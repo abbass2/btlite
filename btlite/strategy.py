@@ -13,6 +13,10 @@ from types import SimpleNamespace
 from collections import defaultdict
 from btlite.bt_utils import get_child_logger, assert_
 from btlite.bt_types import RoundTripTrade, Trade, Order, Contract, TimeInForce, OrderStatus, ModificationType
+from btlite.holiday_calendars import Calendar
+from btlite.metrics import compute_return_metrics, plot_metrics
+import plotly.graph_objects as go
+from IPython.display import display
 
 
 _logger = get_child_logger(__name__)
@@ -105,7 +109,7 @@ def roundtrip_trades(trades: list[Trade]) -> list[RoundTripTrade]:
     return rtt
 
 
-def df_roundtrip_trade(rt_trades: list[RoundTripTrade]) -> pd.DataFrame:
+def df_roundtrip_trades(rt_trades: list[RoundTripTrade]) -> pd.DataFrame:
     df_rts = pd.DataFrame.from_records([dict(
         symbol=s.contract.symbol, 
         multiplier=s.contract.multiplier, 
@@ -244,6 +248,7 @@ class Strategy:
         self.log_trades = True
         self.initial_cash = initial_cash
         self.account = Account(cash=initial_cash, positions=defaultdict(int))
+        self.calendar: Calendar | None = None
 
     def set_market_timestamps(self, timestamps: np.ndarray) -> None:
         '''
@@ -271,6 +276,7 @@ class Strategy:
             timestamps = timestamps.astype('M8[D]')
         else:
             assert_(False, 'unknown frequency: {freq}')
+        self.calendar = Calendar(calendar)
         self.timestamps = timestamps
 
     def add_rule(self, name: str, rule: RuleType) -> None:
@@ -410,6 +416,31 @@ class Strategy:
         df['equity'] = self.initial_cash + df.pnl.cumsum()
         df['ret'] = df.equity.pct_change()
         return df
+
+    def df_roundtrip_trades(self) -> pd.DataFrame:
+        trades = roundtrip_trades(self.trade_history)
+        rt_trades = df_roundtrip_trades(trades)
+        return rt_trades
+
+    def evaluate(self, close_prices: dict[tuple[str, np.datetime64], float], show: bool = True) -> tuple[pd.DataFrame, go.Figure]:
+        pnl = self.get_daily_pnl(close_prices)
+        start_date = self.timestamps[0].astype('M8[D]')
+        end_date = self.timestamps[-1].astype('M8[D]')
+        assert self.calendar is not None
+        trading_days = self.calendar.get_trading_days(start_date, end_date, include_first=True, include_last=True)
+        ret_df = pd.DataFrame({'timestamp': pnl.timestamp.values, 'ret': pnl.ret.values})
+        ret_df.ret = ret_df.ret.fillna(0.)
+        ret_df['date'] = ret_df.timestamp.values.astype('M8[D]')
+        ret_df = ret_df.drop_duplicates(subset=['date'], keep='last')
+        ret_df = ret_df[['date', 'ret']].set_index('date').reindex(trading_days, fill_value=0.).reset_index()
+        metrics = compute_return_metrics(ret_df.date.values.astype('M8[D]'), ret_df.ret.values, self.calendar)
+        df = metrics.to_df()
+        fig = plot_metrics(metrics)
+        if show:
+            display(df)
+            fig.show()
+
+        return (df, fig)
 
 
 @dataclass
