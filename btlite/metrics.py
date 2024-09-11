@@ -187,6 +187,7 @@ def plot_metrics(metrics: Metrics, starting_equity=1e6) -> go.Figure:
                   opacity=0.25, 
                   line_width=0)
 
+
     fig.add_hline(y=starting_equity, opacity=0.25)
 
     rolling_dd = compute_rolling_dd(metrics.equity * starting_equity)
@@ -197,13 +198,14 @@ def plot_metrics(metrics: Metrics, starting_equity=1e6) -> go.Figure:
     fig.add_vrect(x0=metrics.mdd_dates[0], x1=metrics.mdd_dates[1], fillcolor="red", opacity=0.25, line_width=0, row=2, col=1)
 
     if metrics.mdd_dates != metrics.mdd_dates_3yr:
-        fig.add_vrect(x0=metrics.mdd_dates_3yr[0], 
-                      x1=metrics.mdd_dates_3yr[1], 
-                      fillcolor='#FF851B', 
-                      opacity=0.25, 
-                      line_width=0, 
-                      row=2, 
-                      col=1)
+        for row in [1, 2]:
+            fig.add_vrect(x0=metrics.mdd_dates_3yr[0], 
+                        x1=metrics.mdd_dates_3yr[1], 
+                        fillcolor='#FF851B', 
+                        opacity=0.25, 
+                        line_width=0, 
+                        row=row, 
+                        col=1)
             
     returns = metrics.returns
     years = metrics.dates.astype('M8[Y]')[1:]
