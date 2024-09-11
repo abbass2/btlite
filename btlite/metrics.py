@@ -215,6 +215,7 @@ def plot_metrics(metrics: Metrics, starting_equity=1e6) -> go.Figure:
     fig.update_yaxes(title_text="Equity", type="log", row=1, col=1)
     fig.update_yaxes(title_text="Drawdown", row=2, col=1)
     fig.update_yaxes(title_text="Return", row=3, col=1)
+    fig.update_layout(showlegend=False)
     return fig
 
 
