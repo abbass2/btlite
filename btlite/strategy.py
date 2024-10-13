@@ -406,7 +406,10 @@ class Strategy:
                 for trade_callback in self.trade_callbacks:
                     trade_callback(self, timestamp, trade)
 
-    def get_daily_pnl(self, prices: dict[tuple[str, np.datetime64], float], pnl_time: int = 15 * 60 + 59) -> pd.DataFrame:
+    def get_daily_pnl(self, 
+                      prices: dict[tuple[str, np.datetime64], float], 
+                      pnl_time: int = 15 * 60 + 59,
+                      fixed_equity: bool = False) -> pd.DataFrame:
         timestamps = np.unique(self.timestamps.astype('M8[D]')) + np.timedelta64(pnl_time, 'm')
         trades = roundtrip_trades(self.trade_history)
         pnl = get_pnl(trades, timestamps, prices)
@@ -414,7 +417,10 @@ class Strategy:
         df['pnl'] = df.unrealized + df.realized + df.commission
         df = df[['timestamp', 'pnl', 'unrealized', 'realized', 'commission']].groupby('timestamp', as_index=False).sum()
         df['equity'] = self.initial_cash + df.pnl.cumsum()
-        df['ret'] = df.equity.pct_change()
+        if fixed_equity:
+            df['ret'] = df.pnl / self.initial_cash
+        else:
+            df['ret'] = df.equity.pct_change()
         return df
 
     def df_roundtrip_trades(self) -> pd.DataFrame:
@@ -422,8 +428,17 @@ class Strategy:
         rt_trades = df_roundtrip_trades(trades)
         return rt_trades
 
-    def evaluate(self, close_prices: dict[tuple[str, np.datetime64], float], show: bool = True) -> tuple[pd.DataFrame, go.Figure]:
-        pnl = self.get_daily_pnl(close_prices)
+    def evaluate(self, 
+                 close_prices: dict[tuple[str, np.datetime64], float], 
+                 fixed_equity: bool = False, 
+                 show: bool = True) -> tuple[pd.DataFrame, go.Figure]:
+        '''
+        Args:
+            fixed_equity: if set, we assume sizing of trades was done according to initial cash, not the current equity
+            built up at the time the trade was done. For example, if starting cash is $1e6 and we size each trade to 10% of equity
+            then each trade size would be $1e5
+        '''
+        pnl = self.get_daily_pnl(close_prices, fixed_equity=fixed_equity)
         start_date = self.timestamps[0].astype('M8[D]')
         end_date = self.timestamps[-1].astype('M8[D]')
         assert self.calendar is not None
